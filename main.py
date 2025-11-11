@@ -79,6 +79,27 @@ async def subscribe_to_room_pubsub(websocket: WebSocket, room: str):
             # Forward to this websocket (keep safe)
             try:
                 await websocket.send_text(json.dumps(payload))
+
+                 # 🟢 Step 2: If this websocket belongs to the recipient, send delivery ACK back to sender
+                if payload.get("type") == "chat":
+                    sender_id = payload.get("sender_id")
+                    recipient_id = (
+                        int(room.split("_")[2]) if str(sender_id) == room.split("_")[1]
+                        else int(room.split("_")[1])
+                    )
+                    # Send a "delivered_to_recipient" ACK only if this websocket belongs to recipient
+                    # meaning: user_id == recipient_id
+                    # But to know websocket's user_id, we pass it in closure via partial or attr
+                    if getattr(websocket, "user_id", None) == recipient_id:
+                        delivered_ack = {
+                            "type": "receipt",
+                            "temp_id": payload.get("temp_id"),
+                            "status": "delivered_to_recipient",
+                            "server_time": datetime.utcnow().isoformat() + "Z",
+                        }
+                        # Publish ACK to room, sender will pick it up
+                        await publish_room_message(room, delivered_ack)
+                        
             except WebSocketDisconnect:
                 break  # Exit loop if client disconnected
             except Exception as e:
@@ -100,6 +121,9 @@ async def subscribe_to_room_pubsub(websocket: WebSocket, room: str):
 @app.websocket("/ws/chat/{user_id}/{to_user}")
 async def chat_socket(websocket: WebSocket, user_id: int, to_user: int):
     await websocket.accept()
+
+    websocket.user_id = user_id  # attach it for identification ✅
+    
     room = room_name(user_id, to_user)
 
     # Register connection in-memory
