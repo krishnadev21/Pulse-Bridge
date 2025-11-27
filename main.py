@@ -49,8 +49,27 @@ async def persist_message_to_db(sender_id: int, to_user: int, text: str):
     message_id = str(uuid.uuid4())
     timestamp = datetime.utcnow().isoformat() + "Z"
     # return a dict representing saved row
-    return {"message_id": message_id, "timestamp": timestamp}
+    return {"message_id": message_id, "timestamp": timestamp}\
 
+# import httpx
+
+# async def persist_message_to_db(sender_id: int, to_user: int, text: str):
+#     async with httpx.AsyncClient() as client:
+#         resp = await client.post(
+#             "http://127.0.0.1:8000/chat/save-message/",
+#             json={
+#                 "sender": sender_id,
+#                 "recipient": to_user,
+#                 "body": text,
+#             },
+#             timeout=5.0
+#         )
+
+#     data = resp.json()
+#     return {
+#         "message_id": data["message_id"],
+#         "timestamp": data["timestamp"]
+#     }
 
 async def publish_room_message(room: str, payload: dict):
     """Publish to Redis channel for cross-process broadcast"""
