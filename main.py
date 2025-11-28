@@ -1,7 +1,8 @@
 # main.py
-import asyncio
 import json
 import uuid
+import httpx
+import asyncio
 from datetime import datetime
 from typing import Dict, List
 
@@ -35,41 +36,41 @@ def room_name(user1: int, user2: int) -> str:
     return f"private_{a}_{b}"
 
 
+# async def persist_message_to_db(sender_id: int, to_user: int, text: str):     
+    # await asyncio.sleep(0.05)  # simulate small IO latency
+    # # Example: success -> return message_id, timestamp
+    # # To simulate failure, raise Exception
+    # message_id = str(uuid.uuid4())
+    # timestamp = datetime.utcnow().isoformat() + "Z"
+    # # return a dict representing saved row
+    # return {"message_id": message_id, "timestamp": timestamp}\
+
 async def persist_message_to_db(sender_id: int, to_user: int, text: str):
     """
     Persist the message and return an official message_id and timestamp.
     Replace this with:
       - call to Django REST endpoint to save message, or
       - direct DB save using an async ORM.
+    
     Simulate success/failure here for demo.
     """
-    await asyncio.sleep(0.05)  # simulate small IO latency
-    # Example: success -> return message_id, timestamp
-    # To simulate failure, raise Exception
-    message_id = str(uuid.uuid4())
-    timestamp = datetime.utcnow().isoformat() + "Z"
-    # return a dict representing saved row
-    return {"message_id": message_id, "timestamp": timestamp}\
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "http://127.0.0.1:8000/chat/save-message/",
+            json={
+                "sender": sender_id,
+                "recipient": to_user,
+                "body": text,
+                "delivered": True,
+            },
+            timeout=5.0
+        )
 
-# import httpx
-
-# async def persist_message_to_db(sender_id: int, to_user: int, text: str):
-#     async with httpx.AsyncClient() as client:
-#         resp = await client.post(
-#             "http://127.0.0.1:8000/chat/save-message/",
-#             json={
-#                 "sender": sender_id,
-#                 "recipient": to_user,
-#                 "body": text,
-#             },
-#             timeout=5.0
-#         )
-
-#     data = resp.json()
-#     return {
-#         "message_id": data["message_id"],
-#         "timestamp": data["timestamp"]
-#     }
+    data = resp.json()
+    return {
+        "message_id": data["message_id"],
+        "timestamp": data["timestamp"]
+    }
 
 async def publish_room_message(room: str, payload: dict):
     """Publish to Redis channel for cross-process broadcast"""
