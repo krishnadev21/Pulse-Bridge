@@ -282,6 +282,7 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
             if data.get("type") == "chat":
                 temp_id = data.get("temp_id")
                 text = data.get("message")
+                sender_avatar = data.get("sender_avatar")
 
                 # Acknowledge to sender
                 await websocket.send_text(json.dumps({
@@ -304,6 +305,7 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
                         "type": "chat",
                         "message_id": saved["message_id"],
                         "sender_id": user_id,
+                        "sender_avatar": sender_avatar,
                         "room_id": room_id,
                         "message": text,
                         "timestamp": saved["timestamp"],
