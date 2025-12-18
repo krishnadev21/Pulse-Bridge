@@ -9,8 +9,23 @@ from typing import Dict, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis  # pip install redis[async]
 
-REDIS_URL = "redis://localhost:6379/0"
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8000",   # Django
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+REDIS_URL = "redis://localhost:6379/0"
 
 # Connections in memory (per process). Use Redis pub/sub to broadcast across instances.
 active_rooms: Dict[str, List[WebSocket]] = {}
@@ -74,7 +89,7 @@ async def persist_message_to_db(sender_id: int, to_user: int, text: str):
         "timestamp": data["timestamp"]
     }
 
-async def persist_group_message(user_id: int, room_id: int, message: str):
+async def saveGroupMessage(user_id: int, room_id: int, message: str):
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             "http://127.0.0.1:8000/chat/save-group-message/",
@@ -89,6 +104,24 @@ async def persist_group_message(user_id: int, room_id: int, message: str):
     return {
         "message_id": data["message_id"],
         "timestamp": data["timestamp"]
+    }
+
+async def updateLastSeen(user_id: int, last_seen: str):
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "http://127.0.0.1:8000/chat/update-last-seen/",
+            json={
+                "user_id": user_id,
+                "last_seen": last_seen
+            }
+        )
+
+    data = resp.json()
+    return {
+        "status": data["status"],
+        "message": data["message"],
+        "user_id": data["user_id"],
+        "last_seen": data["last_seen"]
     }
 
 
@@ -121,12 +154,10 @@ async def subscribeToRoomPubsub(websocket: WebSocket, room: str):
                 await websocket.send_text(json.dumps(payload))
 
                  # 🟢 Step 2: If this websocket belongs to the recipient, send delivery ACK back to sender
-                if payload.get("type") == "chat":
+                if payload.get("type") == "chat" and payload.get("one_to_one"):
                     sender_id = payload.get("sender_id")
-                    recipient_id = (
-                        int(room.split("_")[2]) if str(sender_id) == room.split("_")[1]
-                        else int(room.split("_")[1])
-                    )
+                    recipient_id = payload.get("recipient_id")
+        
                     # Send a "delivered_to_recipient" ACK only if this websocket belongs to recipient
                     # meaning: user_id == recipient_id
                     # But to know websocket's user_id, we pass it in closure via partial or attr
@@ -139,6 +170,24 @@ async def subscribeToRoomPubsub(websocket: WebSocket, room: str):
                         }
                         # Publish ACK to room, sender will pick it up
                         await publishRoomMessage(room, delivered_ack)
+                
+                if payload.get("type") == "chat" and payload.get("many_to_many"):
+                    sender_id = payload.get("sender_id")
+                    participant_ids = payload.get("participant_ids")  # already a Python list
+
+                    print(f"Participant IDs Type: {type(participant_ids)} --> Python list")
+
+                    # Correct condition
+                    if getattr(websocket, "user_id", None) in participant_ids:
+                        delivered_ack = {
+                            "type": "receipt",
+                            "temp_id": payload.get("temp_id"),
+                            "status": "delivered_to_recipients",
+                            "server_time": datetime.utcnow().isoformat() + "Z",
+                        }
+
+                        await publishRoomMessage(room, delivered_ack)
+
                         
             except WebSocketDisconnect:
                 break  # Exit loop if client disconnected
@@ -157,6 +206,85 @@ async def subscribeToRoomPubsub(websocket: WebSocket, room: str):
         except Exception:
             pass
 
+async def presence_listener(websocket: WebSocket):
+    pubsub = redis.pubsub()
+    await pubsub.subscribe("presence_global")
+
+    async for msg in pubsub.listen():
+        if msg["type"] != "message":
+            continue
+
+        try:
+            await websocket.send_text(msg["data"])
+        except Exception:
+            break
+
+@app.websocket("/ws/presence/{user_id}")
+async def presence_socket(websocket: WebSocket, user_id: int):
+    await websocket.accept()
+
+    # 🔐 Bind identity to the socket
+    websocket.user_id = user_id
+
+    # 🟢 Mark ONLINE
+    await redis.set(f"online:{websocket.user_id}", "1")
+
+    # 🔔 Broadcast ONLINE
+    await redis.publish(
+        "presence_global",
+        json.dumps({
+            "type": "presence",
+            "user_id": websocket.user_id,
+            "status": "online"
+        })
+    )
+
+    # 🟢 START Redis listener
+    listener_task = asyncio.create_task(
+        presence_listener(websocket)
+    )
+
+    try:
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        pass
+
+    finally:
+        listener_task.cancel()
+
+        last_seen = datetime.utcnow().isoformat() + "Z"
+
+        await redis.delete(f"online:{websocket.user_id}")
+        await redis.set(f"last_seen:{websocket.user_id}", last_seen)
+
+        await redis.publish(
+            "presence_global",
+            json.dumps({
+                "type": "presence",
+                "user_id": websocket.user_id,
+                "status": "offline",
+                "last_seen": last_seen
+            })
+        )
+
+        await updateLastSeen(websocket.user_id, last_seen)
+
+
+@app.get("/user/{user_id}/last_seen")
+async def get_last_seen(user_id: int):
+    online = await redis.exists(f"online:{user_id}")
+
+    if online:
+        return {"status": "online"}
+
+    last_seen = await redis.get(f"last_seen:{user_id}")
+
+    return {
+        "status": "offline",
+        "last_seen": last_seen.decode() if last_seen else None
+    }
 
 @app.websocket("/ws/chat/{user_id}/{to_user}")
 async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
@@ -202,8 +330,10 @@ async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
                     # saved => {"message_id": "...", "timestamp": "..."}
                     payload = {
                         "type": "chat",
+                        "one_to_one": True,
                         "message_id": saved["message_id"],
                         "sender_id": int(user_id),
+                        "recipient_id": int(to_user),
                         "message": text,
                         "timestamp": saved["timestamp"],
                         "temp_id": temp_id,  # so clients can reconcile
@@ -256,19 +386,20 @@ async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
         except Exception:
             pass
 
-@app.websocket("/ws/group/{user_id}/{room_id}")
-async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
+@app.websocket("/ws/group/{user_id}/{group_id}/{participant_ids}")
+async def group_chat_socket(websocket: WebSocket, user_id: int, group_id: int, participant_ids: str):
     await websocket.accept()
 
     websocket.user_id = user_id # attach it for identification ✅
     
-    room = group_room_name(room_id)
+    group = group_room_name(group_id)
+    participant_ids = [int(p) for p in participant_ids.split(",") if p.strip()]
 
     # Register connection in-memory
-    active_rooms.setdefault(room, []).append(websocket)
+    active_rooms.setdefault(group, []).append(websocket)
 
     # Start background Redis subscription for this websocket
-    redis_task = asyncio.create_task(subscribeToRoomPubsub(websocket, room))
+    redis_task = asyncio.create_task(subscribeToRoomPubsub(websocket, group))
 
     # Inform client server connection established
     await websocket.send_text(json.dumps({"type": "system", "message": "Connected to group"}))
@@ -294,25 +425,27 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
 
                 # Save to DB (group message)
                 try:
-                    saved = await persist_group_message(
+                    saved = await saveGroupMessage(
                         user_id=user_id,
-                        room_id=room_id,
+                        room_id=group_id,
                         message=text
                     )
 
                     # Broadcast message to group
                     payload = {
                         "type": "chat",
+                        "many_to_many": True,
                         "message_id": saved["message_id"],
                         "sender_id": user_id,
                         "sender_avatar": sender_avatar,
-                        "room_id": room_id,
+                        "room_id": group_id,
                         "message": text,
+                        "participant_ids": participant_ids,
                         "timestamp": saved["timestamp"],
                         "temp_id": temp_id,
                     }
 
-                    await publishRoomMessage(room, payload)
+                    await publishRoomMessage(group, payload)
 
                 except Exception as e:
                     await websocket.send_text(json.dumps({
@@ -324,10 +457,10 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
 
             # === Typing indicator ===
             elif data.get("type") == "typing":
-                await publishRoomMessage(room, {
+                await publishRoomMessage(group, {
                     "type": "typing",
                     "user_id": user_id,
-                    "room_id": room_id,
+                    "room_id": group_id,
                     "is_typing": bool(data.get("is_typing", False)),
                 })
 
@@ -336,11 +469,11 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, room_id: int):
     finally:
          # cleanup: remove connection and cancel pubsub task
         try:
-            active_rooms[room].remove(websocket)
+            active_rooms[group].remove(websocket)
         except Exception:
             pass
-        if not active_rooms.get(room):
-            active_rooms.pop(room, None)
+        if not active_rooms.get(group):
+            active_rooms.pop(group, None)
 
         redis_task.cancel()
         try:
