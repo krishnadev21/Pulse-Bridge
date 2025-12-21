@@ -5,6 +5,7 @@ import httpx
 import asyncio
 from datetime import datetime
 from typing import Dict, List
+from django.http import JsonResponse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis  # pip install redis[async]
@@ -18,7 +19,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:8000",   # Django
-        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8000",   # Django (IP)
+        "http://localhost:8001",   # FastAPI
+        "http://127.0.0.1:8001",   # FastAPI (IP)
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -227,14 +230,14 @@ async def presence_socket(websocket: WebSocket, user_id: int):
     websocket.user_id = user_id
 
     # 🟢 Mark ONLINE
-    await redis.set(f"online:{websocket.user_id}", "1")
+    await redis.set(f"online:{user_id}", "1")
 
     # 🔔 Broadcast ONLINE
     await redis.publish(
         "presence_global",
         json.dumps({
             "type": "presence",
-            "user_id": websocket.user_id,
+            "user_id": user_id,
             "status": "online"
         })
     )
@@ -256,8 +259,9 @@ async def presence_socket(websocket: WebSocket, user_id: int):
 
         last_seen = datetime.utcnow().isoformat() + "Z"
 
-        await redis.delete(f"online:{websocket.user_id}")
-        await redis.set(f"last_seen:{websocket.user_id}", last_seen)
+        await redis.delete(f"online:{user_id}")
+        await redis.set(f"last_seen:{user_id}", str(last_seen))
+
 
         await redis.publish(
             "presence_global",
@@ -271,20 +275,37 @@ async def presence_socket(websocket: WebSocket, user_id: int):
 
         await updateLastSeen(websocket.user_id, last_seen)
 
-
 @app.get("/user/{user_id}/last_seen")
 async def get_last_seen(user_id: int):
-    online = await redis.exists(f"online:{user_id}")
+    try:
+        # 1️⃣ Check online
+        if await redis.exists(f"online:{user_id}"):
+            return {"status": "online"}
 
-    if online:
-        return {"status": "online"}
+        # 2️⃣ Get last seen
+        last_seen = await redis.get(f"last_seen:{user_id}")
 
-    last_seen = await redis.get(f"last_seen:{user_id}")
+        if last_seen:
+            if isinstance(last_seen, bytes):
+                last_seen = last_seen.decode()
 
-    return {
-        "status": "offline",
-        "last_seen": last_seen.decode() if last_seen else None
-    }
+            return {
+                "status": "offline",
+                "last_seen": last_seen
+            }
+
+        # 3️⃣ Never seen
+        return {
+            "status": "offline",
+            "last_seen": None
+        }
+
+    except Exception as e:
+        return JsonResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
 
 @app.websocket("/ws/chat/{user_id}/{to_user}")
 async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
