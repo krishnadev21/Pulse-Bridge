@@ -334,6 +334,7 @@ async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
             if data.get("type") == "chat":
                 temp_id = data.get("temp_id") or str(uuid.uuid4())  # client-provided temp id for optimistic UI
                 text = data.get("message", "")
+                sender_avatar = data.get("sender_avatar")
 
                 # 1) Send immediate server-ACK (receipt) back to *sender* only:
                 #    lets the client know the server got it (but hasn't persisted yet).
@@ -351,13 +352,14 @@ async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
                     # saved => {"message_id": "...", "timestamp": "..."}
                     payload = {
                         "type": "chat",
+                        "message": text,
+                        "temp_id": temp_id,  # so clients can reconcile
                         "one_to_one": True,
-                        "message_id": saved["message_id"],
                         "sender_id": int(user_id),
                         "recipient_id": int(to_user),
-                        "message": text,
+                        "sender_avatar": sender_avatar,
                         "timestamp": saved["timestamp"],
-                        "temp_id": temp_id,  # so clients can reconcile
+                        "message_id": saved["message_id"],
                     }
 
                     # 3) publish to Redis so *all* server instances will broadcast to their connected websockets
@@ -370,10 +372,10 @@ async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
                 except Exception as e:
                     # Persistence failed -> notify sender only with failure
                     payload = {
-                        "type": "receipt",
-                        "temp_id": temp_id,
-                        "status": "failed",
                         "error": str(e),
+                        "type": "receipt",
+                        "status": "failed",
+                        "temp_id": temp_id,
                         "server_time": datetime.utcnow().isoformat() + "Z",
                     }
                     await websocket.send_text(json.dumps(payload))
@@ -455,25 +457,25 @@ async def group_chat_socket(websocket: WebSocket, user_id: int, group_id: int, p
                     # Broadcast message to group
                     payload = {
                         "type": "chat",
+                        "message": text,
+                        "temp_id": temp_id,
+                        "room_id": group_id,
                         "many_to_many": True,
-                        "message_id": saved["message_id"],
                         "sender_id": user_id,
                         "sender_avatar": sender_avatar,
-                        "room_id": group_id,
-                        "message": text,
-                        "participant_ids": participant_ids,
                         "timestamp": saved["timestamp"],
-                        "temp_id": temp_id,
+                        "message_id": saved["message_id"],
+                        "participant_ids": participant_ids,
                     }
 
                     await publishRoomMessage(group, payload)
 
                 except Exception as e:
                     await websocket.send_text(json.dumps({
+                        "error": str(e),
                         "type": "receipt",
-                        "temp_id": temp_id,
                         "status": "failed",
-                        "error": str(e)
+                        "temp_id": temp_id,
                     }))
 
             # === Typing indicator ===
