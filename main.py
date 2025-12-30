@@ -232,20 +232,20 @@ async def presence_socket(websocket: WebSocket, user_id: int):
     # 🟢 Mark ONLINE
     await redis.set(f"online:{user_id}", "1")
 
-    # 🔔 Broadcast ONLINE
+    # 1️⃣ FIRST: Start listening for messages
+    listener_task = asyncio.create_task(
+        presence_listener(websocket)  # 👂 Start listening FIRST
+    )
+
+    # 2️⃣ THEN: Announce you're online
     await redis.publish(
         "presence_global",
         json.dumps({
             "type": "presence",
             "user_id": user_id,
-            "status": "online"
+            "status": "online"  # 🔊 Announce SECOND
         })
-    )
-
-    # 🟢 START Redis listener
-    listener_task = asyncio.create_task(
-        presence_listener(websocket)
-    )
+)
 
     try:
         while True:
