@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Dict, List
 from django.http import JsonResponse
 
+from fastapi import Body
+from fastapi.responses import JSONResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis  # pip install redis[async]
 
@@ -245,7 +247,7 @@ async def presence_socket(websocket: WebSocket, user_id: int):
             "user_id": user_id,
             "status": "online"  # 🔊 Announce SECOND
         })
-)
+    )
 
     try:
         while True:
@@ -305,7 +307,43 @@ async def get_last_seen(user_id: int):
             status_code=500,
             content={"error": str(e)}
         )
+    
+@app.post("/users/presence")
+async def get_users_presence(payload: dict = Body(...)):
+    try:
+        user_ids = payload.get("user_ids", [])
+        result = {}
 
+        for user_id in user_ids:
+            # 🟢 Online
+            if await redis.exists(f"online:{user_id}"):
+                result[str(user_id)] = {"status": "online"}
+                continue
+
+            # 🕒 Last seen
+            last_seen = await redis.get(f"last_seen:{user_id}")
+
+            if last_seen:
+                if isinstance(last_seen, bytes):
+                    last_seen = last_seen.decode()
+
+                result[str(user_id)] = {
+                    "status": "offline",
+                    "last_seen": last_seen
+                }
+            else:
+                result[str(user_id)] = {
+                    "status": "offline",
+                    "last_seen": None
+                }
+                
+        return result
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 @app.websocket("/ws/chat/{user_id}/{to_user}")
 async def chatSocket(websocket: WebSocket, user_id: int, to_user: int):
