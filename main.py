@@ -33,37 +33,60 @@ app.add_middleware(
 
 REDIS_URL = "redis://localhost:6379/0"
 
-# Connections in memory (per process). Use Redis pub/sub to broadcast across instances.
-active_rooms: Dict[str, List[WebSocket]] = {}
 
-# Redis client (async)
+# Initialize Redis
 redis = None
+startup_task = None  # Global reference to the cleanup task
 
+# Startup and shutdown events
 @app.on_event("startup")
 async def startup():
-    global redis
-    redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+    global redis, startup_task
+    try:
+        # Initialize Redis connection
+        redis = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        
+        # Start the cleanup task
+        startup_task = asyncio.create_task(PresenceManager.cleanup_stale_connections())
+        print("Presence manager cleanup task started")
+    except Exception as e:
+        print(f"Startup error: {e}")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    global redis
+    global startup_task
+    # Cancel the cleanup task
+    if startup_task:
+        startup_task.cancel()
+        try:
+            await startup_task
+        except asyncio.CancelledError:
+            pass
+        print("Presence manager cleanup task stopped")
+    
+    # Close Redis connection
     if redis:
-        await redis.close()
+        try:
+            await redis.close()
+        except:
+            pass
 
-
-def roomName(user1: int, user2: int) -> str:
-    a, b = sorted([int(user1), int(user2)])
-    return f"private_{a}_{b}"
 
 #  =============================================================================================================
 
+# Helper function to serialize datetime objects
+def serialize_datetime(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 
 
 # Store multiple connections per user
 user_connections = defaultdict(dict)  # user_id -> {client_id: websocket}
 user_presence = {}  # user_id -> {status, last_seen, active_connections}
+
 
 async def updateLastSeen(user_id: int, last_seen: str):
     async with httpx.AsyncClient() as client:
@@ -94,32 +117,32 @@ class PresenceManager:
             'is_visible': True,
             'client_id': client_id
         }
-
-        print(user_connections)
         
         # Update presence status
         user_presence[user_id] = {
             'status': 'online',
-            'last_seen': datetime.now(),
+            'last_seen': datetime.now().isoformat(),  # Store as ISO string
             'active_connections': len(user_connections[user_id])
         }
-
-        print(user_presence)
         
         # Store in Redis for compatibility with existing system
-        await redis.set(f"online:{user_id}", "1")
-        
-        # Publish presence update
-        await redis.publish(
-            "presence_global",
-            json.dumps({
-                "type": "presence",
-                "user_id": user_id,
-                "status": "online",
-                "last_seen": datetime.now().isoformat(),
-                "active_connections": len(user_connections[user_id])
-            })
-        )
+        if redis:
+            await redis.set(f"online:{user_id}", "1")
+            
+            # Publish presence update
+            try:
+                await redis.publish(
+                    "presence_global",
+                    json.dumps({
+                        "type": "presence",
+                        "user_id": user_id,
+                        "status": "online",
+                        "last_seen": datetime.now().isoformat(),
+                        "active_connections": len(user_connections[user_id])
+                    })
+                )
+            except Exception as e:
+                print(f"Error publishing presence for user {user_id}: {e}")
     
     @staticmethod
     async def remove_connection(user_id: int, client_id: str):
@@ -131,39 +154,47 @@ class PresenceManager:
             # If no connections left, mark as offline
             if not user_connections[user_id]:
                 # Remove from Redis
-                await redis.delete(f"online:{user_id}")
-                
-                last_seen = datetime.utcnow().isoformat() + "Z"
-                await redis.set(f"last_seen:{user_id}", str(last_seen))
+                if redis:
+                    try:
+                        await redis.delete(f"online:{user_id}")
+                        
+                        last_seen = datetime.utcnow().isoformat() + "Z"
+                        await redis.set(f"last_seen:{user_id}", str(last_seen))
+                        
+                        # Update Django database
+                        await updateLastSeen(user_id, last_seen)
+                    except Exception as e:
+                        print(f"Error updating Redis for user {user_id}: {e}")
                 
                 user_presence[user_id] = {
                     'status': 'offline',
-                    'last_seen': last_seen,
+                    'last_seen': datetime.now().isoformat(),
                     'active_connections': 0
                 }
-                
-                # Update Django database
-                await updateLastSeen(user_id, last_seen)
                 
             else:
                 # Still has other connections, remain online
                 user_presence[user_id] = {
                     'status': 'online',
-                    'last_seen': datetime.now(),
+                    'last_seen': datetime.now().isoformat(),
                     'active_connections': len(user_connections[user_id])
                 }
             
             # Publish presence update
-            await redis.publish(
-                "presence_global",
-                json.dumps({
-                    "type": "presence",
-                    "user_id": user_id,
-                    "status": user_presence[user_id]['status'],
-                    "last_seen": user_presence[user_id]['last_seen'],
-                    "active_connections": user_presence[user_id]['active_connections']
-                })
-            )
+            if redis:
+                try:
+                    await redis.publish(
+                        "presence_global",
+                        json.dumps({
+                            "type": "presence",
+                            "user_id": user_id,
+                            "status": user_presence[user_id]['status'],
+                            "last_seen": user_presence[user_id]['last_seen'],
+                            "active_connections": user_presence[user_id]['active_connections']
+                        })
+                    )
+                except Exception as e:
+                    print(f"Error publishing presence update for user {user_id}: {e}")
     
     @staticmethod
     async def update_heartbeat(user_id: int, client_id: str):
@@ -186,21 +217,25 @@ class PresenceManager:
             status = 'online' if any_visible else 'away'
             user_presence[user_id] = {
                 'status': status,
-                'last_seen': datetime.now(),
+                'last_seen': datetime.now().isoformat(),
                 'active_connections': len(user_connections[user_id])
             }
             
             # Publish presence update
-            await redis.publish(
-                "presence_global",
-                json.dumps({
-                    "type": "presence",
-                    "user_id": user_id,
-                    "status": status,
-                    "last_seen": user_presence[user_id]['last_seen'].isoformat(),
-                    "active_connections": user_presence[user_id]['active_connections']
-                })
-            )
+            if redis:
+                try:
+                    await redis.publish(
+                        "presence_global",
+                        json.dumps({
+                            "type": "presence",
+                            "user_id": user_id,
+                            "status": status,
+                            "last_seen": user_presence[user_id]['last_seen'],
+                            "active_connections": user_presence[user_id]['active_connections']
+                        })
+                    )
+                except Exception as e:
+                    print(f"Error publishing visibility update for user {user_id}: {e}")
     
     @staticmethod
     async def get_user_presence(user_id: int):
@@ -209,20 +244,30 @@ class PresenceManager:
             return user_presence[user_id]
         
         # Fallback to Redis if not in memory
-        online = await redis.get(f"online:{user_id}")
-        if online:
-            return {
-                'status': 'online',
-                'last_seen': datetime.now(),
-                'active_connections': 1  # Assume 1 if from Redis
-            }
-        else:
-            last_seen_str = await redis.get(f"last_seen:{user_id}")
-            return {
-                'status': 'offline',
-                'last_seen': last_seen_str or datetime.now(),
-                'active_connections': 0
-            }
+        if redis:
+            try:
+                online = await redis.get(f"online:{user_id}")
+                if online:
+                    return {
+                        'status': 'online',
+                        'last_seen': datetime.now().isoformat(),
+                        'active_connections': 1  # Assume 1 if from Redis
+                    }
+                else:
+                    last_seen_str = await redis.get(f"last_seen:{user_id}")
+                    return {
+                        'status': 'offline',
+                        'last_seen': last_seen_str or datetime.now().isoformat(),
+                        'active_connections': 0
+                    }
+            except Exception as e:
+                print(f"Error getting presence from Redis for user {user_id}: {e}")
+        
+        return {
+            'status': 'offline',
+            'last_seen': datetime.now().isoformat(),
+            'active_connections': 0
+        }
     
     @staticmethod
     async def cleanup_stale_connections():
@@ -238,28 +283,42 @@ class PresenceManager:
                         print(f"Removing stale connection: user={user_id}, client={client_id}")
                         await PresenceManager.remove_connection(user_id, client_id)
 
-# Start cleanup task in the background
-# asyncio.create_task(PresenceManager.cleanup_stale_connections())
-
-async def presence_listener(websocket: WebSocket, client_id: str):
+async def presence_listener(websocket: WebSocket, client_id: str, user_id: int):
     """Listen for global presence updates"""
+    if not redis:
+        return
+    
     pubsub = redis.pubsub()
     await pubsub.subscribe("presence_global")
+    
+    try:
+        async for msg in pubsub.listen():
+            if msg["type"] != "message":
+                continue
 
-    async for msg in pubsub.listen():
-        if msg["type"] != "message":
-            continue
-
+            try:
+                data = json.loads(msg["data"])
+                
+                # Check if this user cares about the presence update
+                # (You might want to filter based on user's contact list)
+                try:
+                    await websocket.send_text(json.dumps(data))
+                except Exception as send_error:
+                    # WebSocket might be closed
+                    print(f"Error sending presence update to user {user_id}: {send_error}")
+                    break
+                    
+            except Exception as e:
+                print(f"Error processing presence message: {e}")
+                continue
+    except Exception as e:
+        print(f"Presence listener error for user {user_id}: {e}")
+    finally:
         try:
-            data = json.loads(msg["data"])
-            
-            # Check if this user cares about the presence update
-            # (You might want to filter based on user's contact list)
-            await websocket.send_text(json.dumps(data))
-            
-        except Exception as e:
-            print(f"Error in presence_listener: {e}")
-            break
+            await pubsub.unsubscribe("presence_global")
+            await pubsub.close()
+        except:
+            pass
 
 @app.websocket("/ws/presence/{user_id}")
 async def presence_socket(websocket: WebSocket, user_id: int):
@@ -277,42 +336,47 @@ async def presence_socket(websocket: WebSocket, user_id: int):
 
     # 1️⃣ Start listening for global presence updates
     listener_task = asyncio.create_task(
-        presence_listener(websocket, client_id)
+        presence_listener(websocket, client_id, user_id)
     )
 
     # 2️⃣ Start heartbeat handler
     async def handle_heartbeats():
         try:
             while True:
-                data = await websocket.receive_text()
-                
                 try:
-                    message = json.loads(data)
+                    data = await websocket.receive_text()
                     
-                    if message.get('type') == 'heartbeat':
-                        await PresenceManager.update_heartbeat(user_id, client_id)
-                    
-                    elif message.get('type') == 'visibility_change':
-                        is_visible = message.get('is_visible', True)
-                        await PresenceManager.update_visibility(user_id, client_id, is_visible)
-                    
-                    elif message.get('type') == 'connection_metadata':
-                        # Just acknowledge, already handled
-                        pass
+                    try:
+                        message = json.loads(data)
                         
-                except json.JSONDecodeError:
-                    # Plain text heartbeat
-                    await PresenceManager.update_heartbeat(user_id, client_id)
+                        if message.get('type') == 'heartbeat':
+                            await PresenceManager.update_heartbeat(user_id, client_id)
+                        
+                        elif message.get('type') == 'visibility_change':
+                            is_visible = message.get('is_visible', True)
+                            await PresenceManager.update_visibility(user_id, client_id, is_visible)
+                        
+                        elif message.get('type') == 'connection_metadata':
+                            # Just acknowledge, already handled
+                            pass
+                            
+                    except json.JSONDecodeError:
+                        # Plain text heartbeat
+                        await PresenceManager.update_heartbeat(user_id, client_id)
+                        
+                except Exception as e:
+                    # Connection closed or error
+                    print(f"WebSocket receive error for user {user_id}: {e}")
+                    break
                     
-        except Exception:
-            # Connection closed
-            pass
+        except Exception as e:
+            print(f"Heartbeat handler error for user {user_id}: {e}")
 
     heartbeat_task = asyncio.create_task(handle_heartbeats())
 
     try:
         # Wait for both tasks
-        await asyncio.gather(listener_task, heartbeat_task)
+        await asyncio.gather(listener_task, heartbeat_task, return_exceptions=True)
         
     except Exception as e:
         print(f"WebSocket error for user {user_id}, client {client_id}: {e}")
@@ -322,48 +386,56 @@ async def presence_socket(websocket: WebSocket, user_id: int):
         listener_task.cancel()
         heartbeat_task.cancel()
         
+        # Wait for tasks to finish
+        try:
+            await asyncio.gather(listener_task, heartbeat_task, return_exceptions=True)
+        except:
+            pass
+        
         # Remove connection
-        await PresenceManager.remove_connection(user_id, client_id)
+        try:
+            await PresenceManager.remove_connection(user_id, client_id)
+        except Exception as e:
+            print(f"Error removing connection for user {user_id}: {e}")
 
 @app.post("/users/presence")
 async def get_users_presence(request: Request):
     """Get presence status for multiple users"""
-    data = await request.json()
-    user_ids = data.get("user_ids", [])
-    
-    result = {}
-    for user_id in user_ids:
-        presence = await PresenceManager.get_user_presence(user_id)
-        result[str(user_id)] = {
-            "status": presence['status'],
-            "last_seen": presence['last_seen'].isoformat() if isinstance(presence['last_seen'], datetime) else presence['last_seen']
-        }
-    
-    return result
+    try:
+        data = await request.json()
+        user_ids = data.get("user_ids", [])
+        
+        result = {}
+        for user_id in user_ids:
+            presence = await PresenceManager.get_user_presence(user_id)
+            result[str(user_id)] = {
+                "status": presence['status'],
+                "last_seen": presence['last_seen']
+            }
+        
+        return result
+    except Exception as e:
+        print(f"Error in /users/presence: {e}")
+        return {"error": str(e)}
 
 @app.get("/user/{user_id}/last_seen")
 async def get_last_seen(user_id: int):
     """Get last seen timestamp for a user"""
-    presence = await PresenceManager.get_user_presence(user_id)
-    
-    return {
-        "user_id": user_id,
-        "status": presence['status'],
-        "last_seen": presence['last_seen'].isoformat() if isinstance(presence['last_seen'], datetime) else presence['last_seen']
-    } 
-
-
-
-
-
-
-
-
-
-
-
-
-
+    try:
+        presence = await PresenceManager.get_user_presence(user_id)
+        
+        return {
+            "user_id": user_id,
+            "status": presence['status'],
+            "last_seen": presence['last_seen']
+        }
+    except Exception as e:
+        print(f"Error in /user/{user_id}/last_seen: {e}")
+        return {
+            "user_id": user_id,
+            "status": "offline",
+            "last_seen": datetime.now().isoformat()
+        }
 
 
 
@@ -371,12 +443,12 @@ async def get_last_seen(user_id: int):
 # =================================================================================================================
 
 
+# Connections in memory (per process). Use Redis pub/sub to broadcast across instances.
+active_rooms: Dict[str, List[WebSocket]] = {}
 
-
-
-
-
-
+def roomName(user1: int, user2: int) -> str:
+    a, b = sorted([int(user1), int(user2)])
+    return f"private_{a}_{b}"
 
 
 def group_room_name(room_id: int) -> str:
