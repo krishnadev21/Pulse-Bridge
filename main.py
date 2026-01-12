@@ -398,7 +398,7 @@ async def presence_socket(websocket: WebSocket, user_id: int):
         try:
             print(f"Removing connection for user {user_id}, client {client_id}")
             await PresenceManager.remove_connection(user_id, client_id)
-            print(f" ----------------------==============-? {user_connections} % {user_presence}")
+            print(f" ----------------------============== -? {user_connections} % {user_presence}")
         except Exception as e:
             print(f"Error removing connection for user {user_id}: {e}")
 
