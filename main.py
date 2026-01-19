@@ -153,25 +153,57 @@ async def presence_socket(websocket: WebSocket, user_id: int):
             print(f"Error removing connection for user {user_id}: {e}")
 
 
+# @app.post("/users/presence")
+# async def get_users_presence(request: Request):
+#     """Get presence status for multiple users"""
+#     try:
+#         data = await request.json()
+#         user_ids = data.get("user_ids", [])
+        
+#         result = {}
+#         for user_id in user_ids:
+#             presence = await presence_manager.get_user_presence(user_id)
+#             result[str(user_id)] = {
+#                 "status": presence['status'],
+#                 "last_seen": presence['last_seen']
+#             }
+        
+#         return result
+#     except Exception as e:
+#         print(f"Error in /users/presence: {e}")
+#         return {"error": str(e)}
+
 @app.post("/users/presence")
 async def get_users_presence(request: Request):
-    """Get presence status for multiple users"""
-    try:
-        data = await request.json()
-        user_ids = data.get("user_ids", [])
-        
-        result = {}
-        for user_id in user_ids:
-            presence = await presence_manager.get_user_presence(user_id)
+    data = await request.json()
+    user_ids = data.get("user_ids", [])
+
+    if not user_ids:
+        return {}
+
+    pipe = redis.pipeline()
+    for user_id in user_ids:
+        pipe.hgetall(f"presence:{user_id}")
+    # print(f"==================================================> {pipe}")
+
+    raw_results = await pipe.execute()
+    # print(f" =============================? {raw_results}")
+
+    result = {}
+    for user_id, data in zip(user_ids, raw_results):
+        if data:
             result[str(user_id)] = {
-                "status": presence['status'],
-                "last_seen": presence['last_seen']
+                "status": data.get("status", "offline"),
+                "last_seen": data.get("last_seen", 0),
             }
-        
-        return result
-    except Exception as e:
-        print(f"Error in /users/presence: {e}")
-        return {"error": str(e)}
+        else:
+            result[str(user_id)] = {
+                "status": "offline",
+                "last_seen": None
+            }
+    # print(f" =============================? {result}")
+    return result
+
 
 
 @app.get("/user/{user_id}/last_seen")

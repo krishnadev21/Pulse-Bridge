@@ -112,7 +112,18 @@ class PresenceManager:
         print(user_presence)
         
         # Store in Redis
-        await self.redis.set(f"online:{user_id}", "1")
+        # await self.redis.set(f"online:{user_id}", "1")
+
+          # ✅ Redis presence (HASH, not STRING)
+        await self.redis.hset(
+            f"presence:{user_id}",
+            mapping={
+                "status": "online",
+                "last_seen": datetime.utcnow().isoformat(),
+                "active_connections":  len(user_connections[user_id]),
+            }
+        )
+        await self.redis.expire(f"presence:{user_id}", 60)
         
         # Publish presence update
         try:
