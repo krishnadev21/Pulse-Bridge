@@ -95,26 +95,62 @@ class PresenceManager:
             )
 
 
-    async def getUserPresence(self, user_id: int) -> Dict[str, Any]:
-       
-       if user_connections[user_id]:
-           return{
-               "status": "online",
-               "last_seen": None,
-           }
-       
-       user_presence = await self.redis.hgetall(f"presence:{user_id}")
-       
-       if not user_presence:
+    async def get_user_presence(self, user_id: int) -> Dict[str, Any]:
+        if not self.redis:
             return {
                 "status": "offline",
                 "last_seen": None,
-            }       
-       
-       return {
+            }
+
+        user_presence = await self.redis.hgetall(f"presence:{user_id}")
+
+        if not user_presence:
+            return {
+                "status": "offline",
+                "last_seen": None,
+            }
+
+        return {
             "status": user_presence.get("status", "offline"),
             "last_seen": user_presence.get("last_seen"),
         }
+
+    async def presence_sweeper():
+        while True:
+            await asyncio.sleep(10)
+
+            users = await redis.keys("presence:*")
+
+            for key in users:
+                user_id = key.split(":")[1]
+
+                alive = await redis.exists(f"heartbeat:{user_id}")
+
+                if not alive:
+                    await redis.hset(
+                        f"presence:{user_id}",
+                        mapping={
+                            "status": "offline",
+                            "last_seen": datetime.utcnow().isoformat()
+                        }
+                    )
+
+    async def cleanup_stale_connections(self):
+        """Remove connections that haven't sent heartbeat in a while"""
+        if not self.redis:
+            return
+        
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+            now = datetime.now()
+            stale_threshold = timedelta(minutes=2)
+            
+            for user_id, connections in list(user_connections.items()):
+                for client_id, connection in list(connections.items()):
+                    if now - connection['last_heartbeat'] > stale_threshold:
+                        print(f"Removing stale connection: user={user_id}, client={client_id}")
+                        await self.remove_connection(user_id, client_id)
+
 
 
 
