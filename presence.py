@@ -20,6 +20,103 @@ class PresenceManager:
     def __init__(self, redis):
         self.redis = redis # Shared Redis instance
 
+        # async def presence_listener(self, websocket: WebSocket, client_id: str, user_id: int, subscription_ready=None):
+#         """Listen for global presence updates"""
+
+#         # print(f" --------------------> Presence Global redis: {self.redis}")
+
+#         if not self.redis:
+#             print(f"Redis not available for user {user_id}")
+#             return
+        
+#         pubsub = self.redis.pubsub()
+#         # print(f" -----------------> User {user_id} subscribing to presence_global")
+#         await pubsub.subscribe("presence_global")
+#         if subscription_ready is not None:
+#             subscription_ready.set()
+        
+#         try:
+#             async for msg in pubsub.listen():
+#                 # print(f"Presence message for user {user_id}: {msg}")
+#                 if msg["type"] != "message":
+#                     continue
+
+#                 try:
+#                     data = json.loads(msg["data"])
+#                     # print(f"Presence data for user {user_id}: {data}")
+                    
+#                     # Check if this user cares about the presence update
+#                     # (You might want to filter based on user's contact list)
+#                     try:
+#                         # print(f"Sending presence update to user {user_id}: {data}")
+#                         await websocket.send_text(json.dumps(data))
+#                     except Exception as send_error:
+#                         # WebSocket might be closed
+#                         print(f"Error sending presence update to user {user_id}: {send_error}")
+#                         break
+                        
+#                 except Exception as e:
+#                     print(f"Error processing presence message: {e}")
+#                     continue
+#         except Exception as e:
+#             print(f"Presence listener error for user {user_id}: {e}")
+#         finally:
+#             try:
+#                 await pubsub.unsubscribe("presence_global")
+#                 await pubsub.close()
+#             except:
+#                 pass
+
+
+    async def presence_listener(self, user_id: int, client_id: str, websocket: WebSocket, subscription_ready=None):
+        """Listen for global presence updates"""
+        
+        if not self.redis:
+            pass
+
+        pubsub = self.redis.pubsub()
+        print(f" -----------------> User {user_id} subscribing to presence_global")
+        await pubsub.subscribe("presence_global")
+
+        if subscription_ready is not None:
+            subscription_ready.set()
+
+        try:
+            async for msg in pubsub.listen():
+                print(f"Message for user {user_id}: {msg}")
+                if msg["type"] != "message":
+                    continue
+                
+                try:
+                    data = json.loads(msg["data"])
+                    print(f"Presence data for user {user_id}: {data}")
+                    
+                    # Check if this user cares about the presence update
+                    # (You might want to filter based on user's contact list)
+                    try:
+                        print(f"```````````````````````````````````Sending presence update to user {user_id}: {data}")
+                        await websocket.send_text(json.dumps(data))
+                    except Exception as send_error:
+                        # WebSocket might be closed
+                        print(f"Error sending presence update to user {user_id}: {send_error}")
+                        break
+                        
+                except Exception as e:
+                    print(f"Error processing presence message: {e}")
+                    continue
+        
+        except Exception as e:
+            print(f"Presence listener error for user {user_id}: {e}")
+
+        finally:
+            try:
+                await pubsub.unsubscribe("presence_global")
+                await pubsub.close()
+            except:
+                pass
+
+            
+
 
     async def add_connection(self, user_id: int, client_id: str, websocket: WebSocket):
         
@@ -33,9 +130,12 @@ class PresenceManager:
                     "status": "online",
                     "last_seen": now,
                 })
+            
+            print(f"User connections after adding: {user_connections}")
 
             await self.redis.expire(f"presence:{user_id}", 60)
-
+            
+            print(f"Published presence online for user {user_id}")
             await self.redis.publish(
                 "presence_global",
                 json.dumps({
@@ -74,6 +174,7 @@ class PresenceManager:
                 }
             )
 
+            print(f"Published presence offline for user {user_id}")
             await self.redis.publish(
                 "presence_global",
                 json.dumps({
@@ -149,7 +250,7 @@ class PresenceManager:
                 for client_id, connection in list(connections.items()):
                     if now - connection['last_heartbeat'] > stale_threshold:
                         print(f"Removing stale connection: user={user_id}, client={client_id}")
-                        await self.remove_connection(user_id, client_id)
+                        await self.remove_connection(user_id, client_id)()
 
 
 

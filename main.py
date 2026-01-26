@@ -81,13 +81,16 @@ async def presence_socket(websocket: WebSocket, user_id: int):
     # Create an event to track subscription completion
     subscription_ready = asyncio.Event()
 
+    print(f"User {user_id} connecting to presence WebSocket with client ID {client_id}")
     # 1️⃣ FIRST: Start listening for global presence updates
     listener_task = asyncio.create_task(
-        presence_manager.presence_listener(websocket, client_id, user_id, subscription_ready)
+        presence_manager.presence_listener(user_id, client_id, websocket, subscription_ready)
     )
 
     # Wait for subscription to be ready
     await subscription_ready.wait()
+
+    print(f"User {user_id} connected with client ID {client_id} to presence WebSocket.")
     
     # 2️⃣ THEN: Add connection (which will publish to presence_global)
     await presence_manager.add_connection(user_id, client_id, websocket)
