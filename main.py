@@ -44,7 +44,7 @@ async def startup():
     presence_manager = PresenceManager(redis)
     
     # Start the cleanup task
-    asyncio.create_task(presence_manager.cleanup_stale_connections())
+    # asyncio.create_task(presence_manager.cleanup_stale_connections())
     print("Presence manager cleanup task started")
 
 
@@ -119,6 +119,10 @@ async def presence_socket(websocket: WebSocket, user_id: int):
                     except json.JSONDecodeError:
                         # Plain text heartbeat
                         await presence_manager.update_heartbeat(user_id, client_id)
+
+                except WebSocketDisconnect:
+                    print(f" --------> WebSocket disconnected for user {user_id}, client {client_id}")
+                    break
                         
                 except Exception as e:
                     # Connection closed or error
