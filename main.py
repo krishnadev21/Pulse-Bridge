@@ -71,93 +71,59 @@ def serialize_datetime(obj):
 async def presence_socket(websocket: WebSocket, user_id: int):
     await websocket.accept()
 
-    # Generate unique client ID for this connection
     client_id = str(uuid.uuid4())
-    
-    # 🔐 Bind identity to the socket
     websocket.user_id = user_id
     websocket.client_id = client_id
 
-    # Create an event to track subscription completion
     subscription_ready = asyncio.Event()
 
-    print(f"User {user_id} connecting to presence WebSocket with client ID {client_id}")
-    # 1️⃣ FIRST: Start listening for global presence updates
     listener_task = asyncio.create_task(
-        presence_manager.presence_listener(user_id, client_id, websocket, subscription_ready)
+        presence_manager.presenceListener(user_id, websocket, subscription_ready)
     )
 
-    # Wait for subscription to be ready
     await subscription_ready.wait()
-
-    print(f"User {user_id} connected with client ID {client_id} to presence WebSocket.")
     
-    # 2️⃣ THEN: Add connection (which will publish to presence_global)
-    await presence_manager.add_connection(user_id, client_id, websocket)
-
-    # Start heartbeat handler
-    async def handle_heartbeats():
-        try:
-            while True:
-                try:
-                    data = await websocket.receive_text()
-                    
-                    try:
-                        message = json.loads(data)
-                        
-                        if message.get('type') == 'heartbeat':
-                            await presence_manager.update_heartbeat(user_id, client_id)
-                        
-                        elif message.get('type') == 'visibility_change':
-                            is_visible = message.get('is_visible', True)
-                            await presence_manager.update_visibility(user_id, client_id, is_visible)
-                        
-                        elif message.get('type') == 'connection_metadata':
-                            # Just acknowledge, already handled
-                            pass
-                            
-                    except json.JSONDecodeError:
-                        # Plain text heartbeat
-                        await presence_manager.update_heartbeat(user_id, client_id)
-
-                except WebSocketDisconnect:
-                    print(f" --------> WebSocket disconnected for user {user_id}, client {client_id}")
-                    break
-                        
-                except Exception as e:
-                    # Connection closed or error
-                    print(f"WebSocket receive error for user {user_id}: {e}")
-                    break
-                    
-        except Exception as e:
-            print(f"Heartbeat handler error for user {user_id}: {e}")
-
-    heartbeat_task = asyncio.create_task(handle_heartbeats())
+    await presence_manager.addConnection(user_id, client_id, websocket)
 
     try:
-        # Wait for both tasks
-        await asyncio.gather(listener_task, heartbeat_task, return_exceptions=True)
-        
-    except Exception as e:
-        print(f"WebSocket error for user {user_id}, client {client_id}: {e}")
+        while True:
+            try:
+                data = await websocket.receive_text()
+
+                message = json.loads(data)
+
+                message_type = message.get('type')
+
+                if message_type == 'heartbeat':
+                    pass
+                    # await presence_manager.update_heartbeat(user_id, client_id)
+                
+                elif message_type == 'visibility_change':
+                    pass
+                    # is_visible = message.get('is_visible', True)
+                    # await presence_manager.update_visibility(user_id, client_id, is_visible)
+                
+                elif message_type == 'connection_metadata':
+                    pass
+
+            except WebSocketDisconnect:
+                print(f"{datetime.now().strftime('%I:%M:%S %p')}: WebSocket disconnected for user {user_id}")
+                return  # 🔴 terminate task
+            
+            except asyncio.CancelledError:
+                return  # 🔴 terminate task
+            
+            except json.JSONDecodeError:
+                await presence_manager.update_heartbeat(user_id, client_id)
+
+            except Exception as e:
+                print(f"Heartbeat error for user {user_id}: {e}")
+                return
         
     finally:
-        # Cancel tasks
+        # print(f"Cleaning up presence for user {user_id}, client {client_id}"
+        await presence_manager.removeconnection(user_id, client_id)
         listener_task.cancel()
-        heartbeat_task.cancel()
-        
-        # Wait for tasks to finish
-        try:
-            await asyncio.gather(listener_task, heartbeat_task, return_exceptions=True)
-        except:
-            pass
-        
-        # Remove connection
-        try:
-            print(f"Removing connection for user {user_id}, client {client_id}")
-            await presence_manager.remove_connection(user_id, client_id)
-        except Exception as e:
-            print(f"Error removing connection for user {user_id}: {e}")
 
 
 # @app.post("/users/presence")

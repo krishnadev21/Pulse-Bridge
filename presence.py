@@ -1,78 +1,62 @@
 import json
-import httpx
+import redis
 import asyncio
 from typing import Dict, Any
 from fastapi import WebSocket
 from collections import defaultdict
 from datetime import datetime, timedelta
+from starlette.websockets import WebSocketState
 
-import redis
-
-# Import redis from config
-from config import get_redis
 
 user_connections = defaultdict(dict) # user_id: {client_id: websocket}.., etc. 
 
 
 class PresenceManager:
-
-
     def __init__(self, redis):
         self.redis = redis # Shared Redis instance
 
-
-    async def presence_listener(self, user_id: int, client_id: str, websocket: WebSocket, subscription_ready=None):
+    async def presenceListener(self, user_id: int, websocket: WebSocket, subscription_ready=None):
         """Listen for global presence updates"""
         
-        if not self.redis:
-            pass
+        if not self.redis: pass
 
         pubsub = self.redis.pubsub()
-        print(f" -----------------> User {user_id} subscribing to presence_global")
         await pubsub.subscribe("presence_global")
 
-        if subscription_ready is not None:
-            subscription_ready.set()
+        if subscription_ready is not None: subscription_ready.set()
 
         try:
             async for msg in pubsub.listen():
-                print(f"Message for user {user_id}: {msg}")
-                if msg["type"] != "message":
-                    continue
+                if websocket.client_state != WebSocketState.CONNECTED: return
+                if msg["type"] != "message": continue
                 
                 try:
                     data = json.loads(msg["data"])
-                    print(f"Presence data for user {user_id}: {data}")
-                    
-                    # Check if this user cares about the presence update
-                    # (You might want to filter based on user's contact list)
-                    try:
-                        print(f"```````````````````````````````````Sending presence update to user {user_id}: {data}")
-                        await websocket.send_text(json.dumps(data))
-                    except Exception as send_error:
-                        # WebSocket might be closed
-                        print(f"Error sending presence update to user {user_id}: {send_error}")
-                        break
-                        
-                except Exception as e:
-                    print(f"Error processing presence message: {e}")
-                    continue
+                    await websocket.send_text(json.dumps(data))
+
+                except json.JSONDecodeError as json_error:
+                    print(f"Error decoding presence message for user {user_id}: {json_error}")
+                    break 
+
+                except asyncio.CancelledError:
+                    break
+                
+                except Exception as send_error:
+                    print(f"Error sending presence update to user {user_id}: {send_error}")
+                    break
+
+        except asyncio.CancelledError:
+            raise                    
         
         except Exception as e:
             print(f"Presence listener error for user {user_id}: {e}")
 
         finally:
-            try:
-                await pubsub.unsubscribe("presence_global")
-                await pubsub.close()
-            except:
-                pass
+            await pubsub.unsubscribe("presence_global")
+            await pubsub.close()
 
             
-
-
-    async def add_connection(self, user_id: int, client_id: str, websocket: WebSocket):
-        
+    async def addConnection(self, user_id: int, client_id: str, websocket: WebSocket):
         try:
             user_connections[user_id][client_id] = websocket
             now = datetime.utcnow().isoformat()
@@ -109,8 +93,7 @@ class PresenceManager:
                 }))
             
 
-    async def remove_connection(self, user_id: int, client_id: str):
-
+    async def removeConnection(self, user_id: int, client_id: str):
         try:
             user_connections[user_id].pop(client_id, None)
 
@@ -203,7 +186,7 @@ class PresenceManager:
                 for client_id, connection in list(connections.items()):
                     if now - connection['last_heartbeat'] > stale_threshold:
                         print(f"Removing stale connection: user={user_id}, client={client_id}")
-                        await self.remove_connection(user_id, client_id)()
+                        await self.removeconnection(user_id, client_id)()
 
 
     
