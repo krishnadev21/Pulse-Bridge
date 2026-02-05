@@ -61,14 +61,14 @@ async def shutdown():
 
 
 # Helper function to serialize datetime objects
-def serialize_datetime(obj):
+def serializeDateTime(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
 @app.websocket("/ws/presence/{user_id}")
-async def presence_socket(websocket: WebSocket, user_id: int):
+async def presenceSocket(websocket: WebSocket, user_id: int):
     await websocket.accept()
 
     client_id = str(uuid.uuid4())
@@ -77,13 +77,17 @@ async def presence_socket(websocket: WebSocket, user_id: int):
 
     subscription_ready = asyncio.Event()
 
+    print(f"{datetime.now().strftime('%I:%M:%S %p')} - User {user_id} connected with client ID {client_id}")
     listener_task = asyncio.create_task(
         presence_manager.presenceListener(user_id, websocket, subscription_ready)
     )
 
     await subscription_ready.wait()
     
-    await presence_manager.addConnection(user_id, client_id, websocket)
+    print(f"{datetime.now().strftime('%I:%M:%S %p')} - Starting heartbeat loop for user {user_id}, client {client_id}")
+    asyncio.create_task(
+        presence_manager.addConnection(user_id, client_id, websocket)
+    )
 
     try:
         while True:
@@ -122,7 +126,7 @@ async def presence_socket(websocket: WebSocket, user_id: int):
         
     finally:
         # print(f"Cleaning up presence for user {user_id}, client {client_id}"
-        await presence_manager.removeconnection(user_id, client_id)
+        await presence_manager.removeConnection(user_id, client_id)
         listener_task.cancel()
 
 

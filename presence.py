@@ -22,6 +22,7 @@ class PresenceManager:
 
         pubsub = self.redis.pubsub()
         await pubsub.subscribe("presence_global")
+        print(f"{datetime.now().strftime('%I:%M:%S %p')} - User {user_id} subscribed to global presence updates")
 
         if subscription_ready is not None: subscription_ready.set()
 
@@ -60,19 +61,21 @@ class PresenceManager:
         try:
             user_connections[user_id][client_id] = websocket
             now = datetime.utcnow().isoformat()
-
+            
+            print(f'{datetime.now().strftime("%I:%M:%S %p")} - User {user_id} has {len(user_connections[user_id])} active connections after adding client {client_id}')
             await self.redis.hset(
                 f"presence:{user_id}",
                 mapping={
                     "status": "online",
                     "last_seen": now,
                 })
+            print(f"{datetime.now().strftime('%I:%M:%S %p')} - Updated Redis presence for user {user_id} to online with last_seen {now}")
             
-            print(f"User connections after adding: {user_connections}")
+            # print(f"User connections after adding: {user_connections}")
 
             await self.redis.expire(f"presence:{user_id}", 60)
             
-            print(f"Published presence online for user {user_id}")
+            print(f"{datetime.now().strftime('%I:%M:%S %p')} - Published presence online for user {user_id}")
             await self.redis.publish(
                 "presence_global",
                 json.dumps({
