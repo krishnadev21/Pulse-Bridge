@@ -3,6 +3,7 @@ import json
 import uuid
 import httpx
 import asyncio
+import time as t
 from typing import Dict, List
 from collections import defaultdict
 from django.http import JsonResponse
@@ -41,11 +42,12 @@ presence_manager = None
 async def startup():
     global redis, presence_manager
     redis = await init_redis()
+    # 🔥 FORCE WRITE PATH WARM-UP
+    await redis.set("__warmup__", "1", ex=5)
+
     presence_manager = PresenceManager(redis)
-    
-    # Start the cleanup task
-    # asyncio.create_task(presence_manager.cleanup_stale_connections())
-    print("Presence manager cleanup task started")
+    print("Presence manager ready")
+
 
 
 @app.on_event("shutdown")
@@ -75,19 +77,13 @@ async def presenceSocket(websocket: WebSocket, user_id: int):
     websocket.user_id = user_id
     websocket.client_id = client_id
 
-    subscription_ready = asyncio.Event()
-
     print(f"{datetime.now().strftime('%I:%M:%S %p')} - User {user_id} connected with client ID {client_id}")
     listener_task = asyncio.create_task(
-        presence_manager.presenceListener(user_id, websocket, subscription_ready)
+        presence_manager.presenceListener(user_id, websocket)
     )
-
-    await subscription_ready.wait()
     
     print(f"{datetime.now().strftime('%I:%M:%S %p')} - Starting heartbeat loop for user {user_id}, client {client_id}")
-    asyncio.create_task(
-        presence_manager.addConnection(user_id, client_id, websocket)
-    )
+    await presence_manager.addConnection(user_id, client_id, websocket)
 
     try:
         while True:
@@ -126,8 +122,10 @@ async def presenceSocket(websocket: WebSocket, user_id: int):
         
     finally:
         # print(f"Cleaning up presence for user {user_id}, client {client_id}"
-        await presence_manager.removeConnection(user_id, client_id)
         listener_task.cancel()
+        await presence_manager.removeConnection(user_id, client_id)
+  
+
 
 
 # @app.post("/users/presence")

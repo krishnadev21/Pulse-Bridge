@@ -1,3 +1,4 @@
+import asyncio
 import redis.asyncio as aioredis
 
 REDIS_URL = "redis://localhost:6379/0"
@@ -6,19 +7,29 @@ REDIS_URL = "redis://localhost:6379/0"
 _redis_instance = None
 _redis_initialized = False
 
+import redis.asyncio as aioredis
+
+_redis_instance = None
+
 async def init_redis():
-    """Initialize Redis (call this once at startup)"""
-    global _redis_instance, _redis_initialized
-    if not _redis_initialized:
-        _redis_instance = await aioredis.from_url(
-            REDIS_URL,
+    global _redis_instance
+    if _redis_instance is None:
+        _redis_instance = aioredis.from_url(
+            "redis://localhost:6379/0",
             decode_responses=True,
-            socket_keepalive=True
+            socket_keepalive=True,
+            max_connections=50,   # 🔥 2x expected concurrent users
         )
-        await _redis_instance.ping()  # Test connection
-        _redis_initialized = True
-        print(f"✅ Redis initialized (id: {id(_redis_instance)})")
+
+        # 🔥 Warm ALL connections
+        await asyncio.gather(
+            *[_redis_instance.ping() for _ in range(5)]
+        )
+
+        print(f"✅ Redis initialized with pool (id: {id(_redis_instance)})")
+
     return _redis_instance
+
 
 def get_redis():
     """
