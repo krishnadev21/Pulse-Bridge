@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from fastapi import Body, Request
 from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Response, status
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from fastapi import FastAPI
@@ -42,9 +43,6 @@ presence_manager = None
 async def startup():
     global redis, presence_manager
     redis = await init_redis()
-    # 🔥 FORCE WRITE PATH WARM-UP
-    await redis.set("__warmup__", "1", ex=5)
-
     presence_manager = PresenceManager(redis)
     print("Presence manager ready")
 
@@ -56,6 +54,9 @@ async def shutdown():
     await close_redis()
     print("Redis connection closed")
 
+@app.get("/favicon.ico", status_code=status.HTTP_204_NO_CONTENT)
+async def favicon():
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 #  =============================================================================================================

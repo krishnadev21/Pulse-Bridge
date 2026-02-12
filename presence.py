@@ -63,36 +63,23 @@ class PresenceManager:
             await pubsub.unsubscribe("presence_global")
             await pubsub.close()
 
-
             
     async def addConnection(self, user_id: int, client_id: str, websocket: WebSocket):
         try:
+            pipe = None
             user_connections[user_id][client_id] = websocket
             now = datetime.utcnow().isoformat()
-
-            t1 = t.perf_counter()
-            await self.redis.hset(
+            
+            # 🔥 CRITICAL FIX: ONE pipeline = ONE connection
+            pipe = self.redis.pipeline()
+            
+            # Add all Redis commands to the pipeline
+            pipe.hset(
                 f"presence:{user_id}",
-                mapping={
-                    "status": "online",
-                    "last_seen": now,
-                })
-            print("HSET took:", t.perf_counter() - t1)
-            
-            # print(f"User connections after adding: {user_connections}")
-            await self.redis.expire(f"presence:{user_id}", 60)
-
-            # 1. Send immediate status to THIS client
-            await websocket.send_text(json.dumps({
-                "type": "presence",
-                "status": "online",
-                "user_id": user_id,
-                "last_seen": now,
-                "source": "direct"  # Optional: indicate this is direct message
-            }))
-            
-            print(f"{datetime.now().strftime('%I:%M:%S %p')} - Published presence online for user {user_id}")
-            await self.redis.publish(
+                mapping={"status": "online", "last_seen": now}
+            )
+            pipe.expire(f"presence:{user_id}", 60)
+            pipe.publish(
                 "presence_global",
                 json.dumps({
                     "type": "presence",
@@ -101,36 +88,54 @@ class PresenceManager:
                     "last_seen": now
                 })
             )
+            
+            # 🔥 SINGLE await = SINGLE connection
+            start = t.perf_counter()
+            await pipe.execute()
+            elapsed = (t.perf_counter() - start) * 1000
+            print(f"⚡ Pipeline took: {elapsed:.2f}ms for user {user_id}")
+            
+            await websocket.send_text(json.dumps({
+                "type": "presence",
+                "status": "online",
+                "user_id": user_id,
+                "last_seen": now
+            }))
 
         except Exception as e:
-            await redis.publish(
-                "presence_global",
-                json.dumps({
-                    "type": "presence",
-                    "user_id": user_id,
-                    "status": "error",
-                }))
+            try:
+                # Publish error status with a fresh pipeline
+                error_pipe = self.redis.pipeline()
+                error_pipe.publish(
+                    "presence_global",
+                    json.dumps({
+                        "type": "presence",
+                        "user_id": user_id,
+                        "status": "error",
+                    })
+                )
+                await error_pipe.execute()
+            except Exception as error_e:
+                print(f"❌ Failed to publish error status: {error_e}")
             
 
     async def removeConnection(self, user_id: int, client_id: str):
         try:
             user_connections[user_id].pop(client_id, None)
-
+            
+            # Still online on another device
             if user_connections[user_id]:
-                return # still online on another device
-
-            now = datetime.utcnow().isoformat() + "Z"
-        
-            await self.redis.hset(
+                return
+            
+            now = datetime.utcnow().isoformat()
+            
+            # 🔥 ONE pipeline = ONE connection
+            pipe = self.redis.pipeline()
+            pipe.hset(
                 f"presence:{user_id}",
-                mapping={
-                    "status": "offline",
-                    "last_seen": now,
-                }
+                mapping={"status": "offline", "last_seen": now}
             )
-
-            print(f"Published presence offline for user {user_id}")
-            await self.redis.publish(
+            pipe.publish(
                 "presence_global",
                 json.dumps({
                     "type": "presence",
@@ -139,9 +144,12 @@ class PresenceManager:
                     "last_seen": now
                 })
             )
+            
+            await pipe.execute()
+            print(f"Published presence offline for user {user_id}")
 
         except Exception as e:
-            await self.redis.publish(
+            await pipe.publish(
                 "presence_global",
                 json.dumps({
                     "type": "presence",
